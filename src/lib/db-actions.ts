@@ -1,4 +1,16 @@
 import { createServerFn } from "@tanstack/react-start";
+import {
+  clearSession,
+  createTemporaryPassword,
+  getCurrentSessionUser,
+  hashPassword,
+  isAdminRole,
+  isPasswordHash,
+  issueSession,
+  requireAdminUser,
+  requireSessionUser,
+  verifyPassword,
+} from "./auth.server";
 
 export const getMySQLTables = createServerFn({ method: "GET" })
   .handler(async () => {
@@ -16,6 +28,7 @@ export const getEscolas = createServerFn({ method: "GET" })
   .handler(async () => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireSessionUser(pool);
       // Tenta buscar da tabela escolas_plurall ou escolas_pluraal (lidando com erros de digitação comuns)
       let escolas: string[] = [];
       try {
@@ -43,6 +56,7 @@ export const getTableData = createServerFn({ method: "POST" })
     try {
       const { tableName, escola, bimestre, ano_mes } = data;
       const { default: pool } = await import("./mysql.server");
+      await requireSessionUser(pool);
       // Mantendo a lista sincronizada com o que é exibido no frontend
       const allowedTables = ['alunos_simulados', 'mapa_simulados', 'questao', 'questao_simulado'];
       if (!allowedTables.includes(tableName.toLowerCase())) {
@@ -105,6 +119,8 @@ export const syncDatabase = createServerFn({ method: "POST" })
   .handler(async () => {
     try {
       const mysql = (await import("mysql2/promise")).default;
+      const { default: authPool } = await import("./mysql.server");
+      await requireAdminUser(authPool);
 
       const schemaSQL = `
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -160,7 +176,7 @@ export const syncDatabase = createServerFn({ method: "POST" })
         
         await connection.query(`
           INSERT IGNORE INTO usuarios (usuario, nome_user, email_user, senha, associacao_uniao, nivel, primeiro_acesso)
-          VALUES ('KAREN', 'Karen', 'KARENALIXAVI@GMAIL.COM', 'MUDAR@123', 'GERAL', 'admin', TRUE)
+          VALUES ('KAREN', 'Karen', 'KARENALIXAVI@GMAIL.COM', '${hashPassword("MUDAR@123")}', 'GERAL', 'admin', TRUE)
         `);
         
         await connection.end();
@@ -191,6 +207,103 @@ export const syncDatabase = createServerFn({ method: "POST" })
     }
   });
 
+export const syncLocalToRailway = createServerFn({ method: "POST" })
+  .handler(async () => {
+    const dataTables = [
+      "escolas_pluraal",
+      "escolas_plurall",
+      "alunos_simulados",
+      "mapa_simulados",
+      "questao",
+      "questao_simulado",
+      "links_bi",
+    ];
+
+    const quoteId = (value: string) => `\`${value.replace(/`/g, "``")}\``;
+
+    try {
+      const mysql = (await import("mysql2/promise")).default;
+      const { default: authPool } = await import("./mysql.server");
+      await requireAdminUser(authPool);
+
+      const local = await mysql.createConnection({
+        host: process.env.LOCAL_HOST,
+        port: Number(process.env.LOCAL_PORT) || 3306,
+        database: process.env.LOCAL_DB,
+        user: process.env.LOCAL_USER,
+        password: process.env.LOCAL_PASSWORD,
+      });
+
+      const cloud = await mysql.createConnection({
+        host: process.env.CLOUD_HOST,
+        port: Number(process.env.CLOUD_PORT) || 4000,
+        database: process.env.CLOUD_DB,
+        user: process.env.CLOUD_USER,
+        password: process.env.CLOUD_PASSWORD,
+        ssl: { rejectUnauthorized: false },
+      });
+
+      try {
+        const results: { table: string; rows: number; status: string }[] = [];
+
+        for (const table of dataTables) {
+          const [exists]: any = await local.query("SHOW TABLES LIKE ?", [table]);
+          if (!exists.length) {
+            results.push({ table, rows: 0, status: "ignorada: nao existe no local" });
+            continue;
+          }
+
+          const [createRows]: any = await local.query(`SHOW CREATE TABLE ${quoteId(table)}`);
+          const createSql = String(createRows[0]["Create Table"]).replace(/^CREATE TABLE/i, "CREATE TABLE IF NOT EXISTS");
+          await cloud.query(createSql);
+
+          const [columnsData]: any = await local.query(`SHOW COLUMNS FROM ${quoteId(table)}`);
+          const columns = columnsData.map((column: any) => String(column.Field));
+          if (!columns.length) {
+            results.push({ table, rows: 0, status: "ignorada: sem colunas" });
+            continue;
+          }
+
+          const [pkRows]: any = await local.query(`SHOW KEYS FROM ${quoteId(table)} WHERE Key_name = 'PRIMARY'`);
+          const primaryKeys = new Set(pkRows.map((row: any) => String(row.Column_name)));
+          const updateColumns = columns.filter((column) => !primaryKeys.has(column));
+          const updateClause = updateColumns.length
+            ? ` ON DUPLICATE KEY UPDATE ${updateColumns.map((column) => `${quoteId(column)} = VALUES(${quoteId(column)})`).join(", ")}`
+            : "";
+          const insertSql = `INSERT INTO ${quoteId(table)} (${columns.map(quoteId).join(", ")}) VALUES ?${updateClause}`;
+
+          let copied = 0;
+          let offset = 0;
+          const batchSize = 1000;
+
+          while (true) {
+            const [rows]: any = await local.query(`SELECT * FROM ${quoteId(table)} LIMIT ? OFFSET ?`, [batchSize, offset]);
+            if (!rows.length) break;
+
+            await cloud.query(insertSql, [rows.map((row: any) => columns.map((column) => row[column]))]);
+            copied += rows.length;
+            offset += rows.length;
+          }
+
+          results.push({ table, rows: copied, status: "sincronizada" });
+        }
+
+        const total = results.reduce((sum, item) => sum + item.rows, 0);
+        return {
+          success: true,
+          message: `Sincronizacao concluida: ${total.toLocaleString("pt-BR")} linhas processadas.`,
+          results,
+        };
+      } finally {
+        await local.end();
+        await cloud.end();
+      }
+    } catch (error: any) {
+      console.error("Erro na sincronizacao local -> Railway:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
 export const loginUser = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { login_ou_email: string; senha_pura: string } }) => {
     try {
@@ -212,16 +325,28 @@ export const loginUser = createServerFn({ method: "POST" })
          WHERE LOWER(usuario) = ? OR LOWER(email_user) = ? LIMIT 1`,
         [loginLower, loginLower]
       );
-      await connection.end();
+      // A conexão só é encerrada depois de validar senha, migrar hash legado e emitir a sessão.
 
       if (rows.length === 0) {
+        await connection.end();
         return { success: false, error: "Usuário ou email não encontrado." };
       }
 
       const user = rows[0];
-      if (user.senha !== data.senha_pura) {
+      if (!verifyPassword(data.senha_pura, String(user.senha || ""))) {
+        await connection.end();
         return { success: false, error: "Senha incorreta." };
       }
+
+      if (!isPasswordHash(String(user.senha || ""))) {
+        await connection.query(`UPDATE usuarios SET senha = ? WHERE id_user = ?`, [
+          hashPassword(data.senha_pura),
+          user.id_user,
+        ]);
+      }
+
+      issueSession(String(user.id_user));
+      await connection.end();
 
       return { 
         success: true, 
@@ -240,9 +365,31 @@ export const loginUser = createServerFn({ method: "POST" })
     }
   });
 
+export const getCurrentUser = createServerFn({ method: "GET" })
+  .handler(async () => {
+    try {
+      const { default: pool } = await import("./mysql.server");
+      const user = await getCurrentSessionUser(pool);
+      return { success: true, user };
+    } catch (error: any) {
+      console.error("Current User Error:", error);
+      return { success: false, error: "Erro ao validar sessão." };
+    }
+  });
+
+export const logoutUser = createServerFn({ method: "POST" })
+  .handler(async () => {
+    clearSession();
+    return { success: true };
+  });
+
 export const updatePassword = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { userId: string; novaSenhaPura: string } }) => {
     try {
+      if (!data.novaSenhaPura || data.novaSenhaPura.length < 8) {
+        return { success: false, error: "A senha deve ter no mínimo 8 caracteres." };
+      }
+
       const mysql = (await import("mysql2/promise")).default;
       const isCloud = process.env.DB_MODE === 'cloud';
       const connection = await mysql.createConnection({
@@ -254,9 +401,15 @@ export const updatePassword = createServerFn({ method: "POST" })
         ssl: isCloud ? { rejectUnauthorized: false } : undefined
       });
 
+      const sessionUser = await requireSessionUser(connection);
+      if (sessionUser.id !== String(data.userId) && !isAdminRole(sessionUser.role)) {
+        await connection.end();
+        return { success: false, error: "Você não tem permissão para alterar esta senha." };
+      }
+
       await connection.query(
         `UPDATE usuarios SET senha = ?, primeiro_acesso = FALSE WHERE id_user = ?`,
-        [data.novaSenhaPura, data.userId]
+        [hashPassword(data.novaSenhaPura), data.userId]
       );
       await connection.end();
       return { success: true };
@@ -298,6 +451,10 @@ export const sendPasswordResetCode = createServerFn({ method: "POST" })
 export const resetPasswordWithCode = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { email: string; codigo: string; novaSenhaPura: string } }) => {
     try {
+      if (!data.novaSenhaPura || data.novaSenhaPura.length < 8) {
+        return { success: false, error: "A senha deve ter no mínimo 8 caracteres." };
+      }
+
       const { default: pool } = await import("./mysql.server");
       const [rows]: any = await pool.query(
         `SELECT id_user, reset_codigo, reset_expira FROM usuarios WHERE email_user = ?`,
@@ -312,7 +469,7 @@ export const resetPasswordWithCode = createServerFn({ method: "POST" })
 
       await pool.query(
         `UPDATE usuarios SET senha = ?, reset_codigo = NULL, reset_expira = NULL, primeiro_acesso = FALSE WHERE id_user = ?`,
-        [data.novaSenhaPura, user.id_user]
+        [hashPassword(data.novaSenhaPura), user.id_user]
       );
 
       return { success: true };
@@ -335,13 +492,14 @@ export const resetUserPassword = createServerFn({ method: "POST" })
         ssl: isCloud ? { rejectUnauthorized: true } : undefined
       });
 
-      const defaultPassword = "MUDAR@123";
+      await requireAdminUser(connection);
+      const defaultPassword = createTemporaryPassword();
       await connection.query(
         `UPDATE usuarios SET senha = ?, primeiro_acesso = TRUE WHERE id_user = ?`,
-        [defaultPassword, userId]
+        [hashPassword(defaultPassword), userId]
       );
       await connection.end();
-      return { success: true, message: `Senha resetada para: ${defaultPassword}` };
+      return { success: true, message: `Senha temporária gerada: ${defaultPassword}`, temporaryPassword: defaultPassword };
     } catch (error: any) {
       console.error("Reset User Password Error:", error);
       return { success: false, error: "Erro ao resetar senha no banco." };
@@ -352,6 +510,7 @@ export const getAdminUsers = createServerFn({ method: "GET" })
   .handler(async () => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       const [rows]: any = await pool.query(`SELECT id_user as id, email_user as email, nome_user as full_name, nivel as role FROM usuarios ORDER BY nome_user`);
       return { success: true, users: rows.map((r: any) => ({ ...r, id: String(r.id) })) };
     } catch (error: any) {
@@ -363,6 +522,7 @@ export const getAdminLinks = createServerFn({ method: "GET" })
   .handler(async () => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       const [rows]: any = await pool.query(`SELECT id_link as id, titulo as name, url_link as url, descricao FROM links_bi ORDER BY titulo`);
       return { success: true, links: rows.map((r: any) => ({ ...r, id: String(r.id) })) };
     } catch (error: any) {
@@ -374,6 +534,7 @@ export const getUserPermissions = createServerFn({ method: "POST" })
   .handler(async ({ data: userId }: { data: string }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       const [rows]: any = await pool.query(`SELECT id_link FROM permissoes_links WHERE id_user = ?`, [userId]);
       return { success: true, links: rows.map((r: any) => String(r.id_link)) };
     } catch (error: any) {
@@ -385,6 +546,7 @@ export const toggleUserLink = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { userId: string; linkId: string; checked: boolean } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       if (data.checked) {
         await pool.query(`INSERT IGNORE INTO permissoes_links (id_user, id_link) VALUES (?, ?)`, [data.userId, data.linkId]);
       } else {
@@ -400,6 +562,7 @@ export const toggleUserAdmin = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { userId: string; isAdmin: boolean } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       const nivel = data.isAdmin ? 'admin' : 'coordenacao';
       await pool.query(`UPDATE usuarios SET nivel = ? WHERE id_user = ?`, [nivel, data.userId]);
       return { success: true };
@@ -412,15 +575,16 @@ export const createAdminUser = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { email: string; nome: string; nivel: string } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
-      const defaultPassword = "MUDAR@123";
+      await requireAdminUser(pool);
+      const defaultPassword = createTemporaryPassword();
       const usuario = data.email.split("@")[0].toUpperCase();
       
       await pool.query(
         `INSERT INTO usuarios (usuario, nome_user, email_user, senha, nivel, primeiro_acesso) 
          VALUES (?, ?, ?, ?, ?, TRUE)`,
-        [usuario, data.nome, data.email, defaultPassword, data.nivel]
+        [usuario, data.nome, data.email, hashPassword(defaultPassword), data.nivel]
       );
-      return { success: true };
+      return { success: true, temporaryPassword: defaultPassword };
     } catch (error: any) {
       return { success: false, error: error.message };
     }
@@ -430,6 +594,7 @@ export const createAdminLink = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { titulo: string; url: string; descricao: string } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       await pool.query(
         `INSERT INTO links_bi (titulo, url_link, descricao) VALUES (?, ?, ?)`,
         [data.titulo, data.url, data.descricao]
@@ -444,6 +609,7 @@ export const deleteAdminLink = createServerFn({ method: "POST" })
   .handler(async ({ data: id }: { data: string }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       await pool.query(`DELETE FROM links_bi WHERE id_link = ?`, [id]);
       return { success: true };
     } catch (error: any) {
@@ -455,10 +621,11 @@ export const getDashboardLinks = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { userId: string; role: string } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      const sessionUser = await requireSessionUser(pool);
       let query = "";
       let params: any[] = [];
 
-      const userRole = (data.role || "").toLowerCase();
+      const userRole = (sessionUser.role || "").toLowerCase();
       if (userRole === 'admin' || userRole === 'admin2') {
         query = `SELECT id_link as id, titulo as name, url_link as url, descricao FROM links_bi ORDER BY titulo`;
       } else {
@@ -469,7 +636,7 @@ export const getDashboardLinks = createServerFn({ method: "POST" })
           WHERE p.id_user = ?
           ORDER BY l.titulo
         `;
-        params = [data.userId];
+        params = [sessionUser.id];
       }
 
       const [rows]: any = await pool.query(query, params);
@@ -504,6 +671,7 @@ export const updateAdminLink = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { id: string; titulo: string; url: string; descricao: string } }) => {
     try {
       const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       await pool.query(
         `UPDATE links_bi SET titulo = ?, url_link = ?, descricao = ? WHERE id_link = ?`,
         [data.titulo, data.url, data.descricao, data.id]
@@ -591,6 +759,9 @@ export const getReportsAnalytics = createServerFn({ method: "POST" })
         },
       };
       const filters: ReportFilters = { ...(data || {}) };
+      const sessionUser = await requireSessionUser(pool);
+      filters.userId = sessionUser.id;
+      filters.userRole = sessionUser.role;
 
       const [tableRows]: any = await pool.query(
         `SELECT table_schema, table_name

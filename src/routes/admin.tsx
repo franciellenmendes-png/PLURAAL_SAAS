@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { syncDatabase, resetUserPassword, getAdminUsers, getAdminLinks, getUserPermissions, toggleUserLink, toggleUserAdmin, createAdminUser, createAdminLink, deleteAdminLink, updateAdminLink } from "@/lib/db-actions";
+import { syncLocalToRailway, resetUserPassword, getAdminUsers, getAdminLinks, getUserPermissions, toggleUserLink, toggleUserAdmin, createAdminUser, createAdminLink, deleteAdminLink, updateAdminLink } from "@/lib/db-actions";
 
 export const Route = createFileRoute("/admin")({
   component: AdminPage,
@@ -38,7 +38,7 @@ function AdminPage() {
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      const res = await syncDatabase();
+      const res = await syncLocalToRailway();
       if (res.success) {
         toast.success(res.message);
       } else {
@@ -125,7 +125,7 @@ function AdminPage() {
     const res = await createAdminUser({ data: { nome: newUserName, email: newUserEmail, nivel: newUserRole } });
     setIsSubmittingUser(false);
     if (!res.success) return toast.error(res.error);
-    toast.success("Usuário criado com sucesso! Senha padrão: MUDAR@123");
+    toast.success(`Usuário criado. Senha temporária: ${res.temporaryPassword}`);
     setShowNewUser(false);
     setNewUserName("");
     setNewUserEmail("");
@@ -333,7 +333,7 @@ function AdminPage() {
                         {isSubmittingUser ? <Loader2 className="w-5 h-5 animate-spin mr-2" /> : "Efetivar Cadastro"}
                       </Button>
                       <p className="mt-4 text-center text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                        A senha temporária será definida como <span className="text-primary font-black">MUDAR@123</span>
+                        A senha temporária será gerada automaticamente
                       </p>
                     </div>
                   </form>

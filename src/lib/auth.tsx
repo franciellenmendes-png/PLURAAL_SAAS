@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { loginUser } from "./db-actions";
+import { getCurrentUser, loginUser, logoutUser } from "./db-actions";
 
 interface CustomUser {
   id: string;
@@ -26,23 +26,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Restaurar sessão local
-    const savedUser = localStorage.getItem("plurall_user");
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
-    setLoading(false);
+    let mounted = true;
+    getCurrentUser()
+      .then((res: any) => {
+        if (mounted && res?.success && res.user) setUser(res.user);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const signIn: AuthCtx["signIn"] = async (login_ou_email, senha_pura) => {
     try {
       const rawRes = await loginUser({ data: { login_ou_email, senha_pura } });
-      console.log("Response from loginUser:", rawRes);
-      
       const res = (rawRes as any)?.data !== undefined ? (rawRes as any).data : rawRes;
       
       if (res && res.success && res.user) {
         setUser(res.user);
-        localStorage.setItem("plurall_user", JSON.stringify(res.user));
         return {};
       }
       
@@ -60,8 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => { 
+    await logoutUser();
     setUser(null);
-    localStorage.removeItem("plurall_user");
   };
 
   return (

@@ -59,7 +59,7 @@ function LoginPage() {
     const p1 = fd.get("p1") as string;
     const p2 = fd.get("p2") as string;
 
-    if (p1.length < 6) return toast.error("A senha deve ter no mínimo 6 caracteres.");
+    if (p1.length < 8) return toast.error("A senha deve ter no mínimo 8 caracteres.");
     if (p1 !== p2) return toast.error("As senhas não coincidem.");
 
     setBusy(true);
