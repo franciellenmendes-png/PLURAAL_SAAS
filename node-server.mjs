@@ -28,7 +28,7 @@ const mimeTypes = {
 
 function getStaticPath(urlPath) {
   const decodedPath = decodeURIComponent(urlPath);
-  const normalizedPath = normalize(decodedPath).replace(/^(\.\.[\\/])+/, "");
+  const normalizedPath = normalize(decodedPath).replace(/^(\.\.[\\/])+/, "").replace(/^[/\\]+/, "");
   const filePath = join(clientDir, normalizedPath);
 
   if (!filePath.startsWith(clientDir)) {
@@ -53,8 +53,23 @@ function sendStaticFile(req, res, filePath) {
 
 async function sendFetchResponse(res, response) {
   res.statusCode = response.status;
+
+  if (typeof response.headers.getSetCookie === "function") {
+    const cookies = response.headers.getSetCookie();
+    if (cookies && cookies.length > 0) {
+      res.setHeader("set-cookie", cookies);
+    }
+  } else {
+    const cookie = response.headers.get("set-cookie");
+    if (cookie) {
+      res.setHeader("set-cookie", cookie);
+    }
+  }
+
   response.headers.forEach((value, key) => {
-    res.setHeader(key, value);
+    if (key.toLowerCase() !== "set-cookie") {
+      res.setHeader(key, value);
+    }
   });
 
   if (!response.body) {
@@ -67,9 +82,24 @@ async function sendFetchResponse(res, response) {
 
 createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || "/", `http://${req.headers.host || `localhost:${port}`}`);
+    const hostHeader = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${port}`;
+    const protoHeader = req.headers["x-forwarded-proto"] || "http";
+    const url = new URL(req.url || "/", `${protoHeader}://${hostHeader}`);
 
-    if (url.pathname.startsWith("/assets/")) {
+    // Favicon fallback to avoid 404 noise
+    if (url.pathname === "/favicon.ico") {
+      const staticFavicon = getStaticPath("/favicon.ico") || getStaticPath("/assets/ICON DADO-Db6N-zBf.png");
+      if (staticFavicon) {
+        sendStaticFile(req, res, staticFavicon);
+        return;
+      }
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    // Serve static files from dist/client
+    if (url.pathname.startsWith("/assets/") || url.pathname.includes(".")) {
       const staticPath = getStaticPath(url.pathname);
       if (staticPath) {
         sendStaticFile(req, res, staticPath);
@@ -77,9 +107,20 @@ createServer(async (req, res) => {
       }
     }
 
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (value !== undefined) {
+        if (Array.isArray(value)) {
+          for (const v of value) headers.append(key, v);
+        } else {
+          headers.set(key, value);
+        }
+      }
+    }
+
     const request = new Request(url, {
       method: req.method,
-      headers: req.headers,
+      headers,
       body: req.method === "GET" || req.method === "HEAD" ? undefined : req,
       duplex: "half",
     });
@@ -87,7 +128,7 @@ createServer(async (req, res) => {
     const response = await app.fetch(request, process.env, {});
     await sendFetchResponse(res, response);
   } catch (error) {
-    console.error(error);
+    console.error("Server Error:", error);
     res.statusCode = 500;
     res.setHeader("content-type", "text/plain; charset=utf-8");
     res.end("Internal Server Error");

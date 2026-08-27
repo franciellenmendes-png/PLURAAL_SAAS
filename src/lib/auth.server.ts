@@ -11,8 +11,7 @@ export type SessionUser = {
 };
 
 const SESSION_MAX_AGE = 60 * 60 * 8;
-const SESSION_COOKIE =
-  process.env.NODE_ENV === "production" ? "__Host-pluraal_session" : "pluraal_session";
+const SESSION_COOKIE = "pluraal_session";
 
 const isProduction = process.env.NODE_ENV === "production";
 

@@ -307,46 +307,33 @@ export const syncLocalToRailway = createServerFn({ method: "POST" })
 export const loginUser = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data: { login_ou_email: string; senha_pura: string } }) => {
     try {
-      const mysql = (await import("mysql2/promise")).default;
-      const isCloud = process.env.DB_MODE === 'cloud';
-      const connection = await mysql.createConnection({
-        host: isCloud ? process.env.CLOUD_HOST : process.env.LOCAL_HOST,
-        port: Number(isCloud ? process.env.CLOUD_PORT : process.env.LOCAL_PORT) || 3306,
-        database: isCloud ? process.env.CLOUD_DB : process.env.LOCAL_DB,
-        user: isCloud ? process.env.CLOUD_USER : process.env.LOCAL_USER,
-        password: isCloud ? process.env.CLOUD_PASSWORD : process.env.LOCAL_PASSWORD,
-        ssl: isCloud ? { rejectUnauthorized: false } : undefined
-      });
+      const { default: pool } = await import("./mysql.server");
 
       const loginLower = data.login_ou_email.toLowerCase();
-      const [rows]: any = await connection.query(
+      const [rows]: any = await pool.query(
         `SELECT id_user, usuario, nome_user, email_user, associacao_uniao, nivel, primeiro_acesso, senha
          FROM usuarios 
          WHERE LOWER(usuario) = ? OR LOWER(email_user) = ? LIMIT 1`,
         [loginLower, loginLower]
       );
-      // A conexão só é encerrada depois de validar senha, migrar hash legado e emitir a sessão.
 
       if (rows.length === 0) {
-        await connection.end();
         return { success: false, error: "Usuário ou email não encontrado." };
       }
 
       const user = rows[0];
       if (!verifyPassword(data.senha_pura, String(user.senha || ""))) {
-        await connection.end();
         return { success: false, error: "Senha incorreta." };
       }
 
       if (!isPasswordHash(String(user.senha || ""))) {
-        await connection.query(`UPDATE usuarios SET senha = ? WHERE id_user = ?`, [
+        await pool.query(`UPDATE usuarios SET senha = ? WHERE id_user = ?`, [
           hashPassword(data.senha_pura),
           user.id_user,
         ]);
       }
 
       issueSession(String(user.id_user));
-      await connection.end();
 
       return { 
         success: true, 
@@ -390,28 +377,16 @@ export const updatePassword = createServerFn({ method: "POST" })
         return { success: false, error: "A senha deve ter no mínimo 8 caracteres." };
       }
 
-      const mysql = (await import("mysql2/promise")).default;
-      const isCloud = process.env.DB_MODE === 'cloud';
-      const connection = await mysql.createConnection({
-        host: isCloud ? process.env.CLOUD_HOST : process.env.LOCAL_HOST,
-        port: Number(isCloud ? process.env.CLOUD_PORT : process.env.LOCAL_PORT) || 3306,
-        database: isCloud ? process.env.CLOUD_DB : process.env.LOCAL_DB,
-        user: isCloud ? process.env.CLOUD_USER : process.env.LOCAL_USER,
-        password: isCloud ? process.env.CLOUD_PASSWORD : process.env.LOCAL_PASSWORD,
-        ssl: isCloud ? { rejectUnauthorized: false } : undefined
-      });
-
-      const sessionUser = await requireSessionUser(connection);
+      const { default: pool } = await import("./mysql.server");
+      const sessionUser = await requireSessionUser(pool);
       if (sessionUser.id !== String(data.userId) && !isAdminRole(sessionUser.role)) {
-        await connection.end();
         return { success: false, error: "Você não tem permissão para alterar esta senha." };
       }
 
-      await connection.query(
+      await pool.query(
         `UPDATE usuarios SET senha = ?, primeiro_acesso = FALSE WHERE id_user = ?`,
         [hashPassword(data.novaSenhaPura), data.userId]
       );
-      await connection.end();
       return { success: true };
     } catch (error: any) {
       console.error("Update Password Error:", error);
@@ -481,24 +456,13 @@ export const resetPasswordWithCode = createServerFn({ method: "POST" })
 export const resetUserPassword = createServerFn({ method: "POST" })
   .handler(async ({ data: userId }: { data: string }) => {
     try {
-      const mysql = (await import("mysql2/promise")).default;
-      const isCloud = process.env.DB_MODE === 'cloud';
-      const connection = await mysql.createConnection({
-        host: isCloud ? process.env.CLOUD_HOST : process.env.LOCAL_HOST,
-        port: Number(isCloud ? process.env.CLOUD_PORT : process.env.LOCAL_PORT) || 3306,
-        database: isCloud ? process.env.CLOUD_DB : process.env.LOCAL_DB,
-        user: isCloud ? process.env.CLOUD_USER : process.env.LOCAL_USER,
-        password: isCloud ? process.env.CLOUD_PASSWORD : process.env.LOCAL_PASSWORD,
-        ssl: isCloud ? { rejectUnauthorized: true } : undefined
-      });
-
-      await requireAdminUser(connection);
+      const { default: pool } = await import("./mysql.server");
+      await requireAdminUser(pool);
       const defaultPassword = createTemporaryPassword();
-      await connection.query(
+      await pool.query(
         `UPDATE usuarios SET senha = ?, primeiro_acesso = TRUE WHERE id_user = ?`,
         [hashPassword(defaultPassword), userId]
       );
-      await connection.end();
       return { success: true, message: `Senha temporária gerada: ${defaultPassword}`, temporaryPassword: defaultPassword };
     } catch (error: any) {
       console.error("Reset User Password Error:", error);
@@ -697,67 +661,8 @@ type ReportFilters = {
 
 export const getReportsAnalytics = createServerFn({ method: "POST" })
   .handler(async ({ data }: { data?: ReportFilters }) => {
-    let pool: any;
     try {
-      const mysql = (await import("mysql2/promise")).default;
-      const isCloud = process.env.DB_MODE === "cloud";
-      const connectionConfig = {
-        host: isCloud ? process.env.CLOUD_HOST : process.env.LOCAL_HOST,
-        port: Number(isCloud ? process.env.CLOUD_PORT : process.env.LOCAL_PORT) || 3306,
-        database: isCloud ? process.env.CLOUD_DB : process.env.LOCAL_DB,
-        user: isCloud ? process.env.CLOUD_USER : process.env.LOCAL_USER,
-        password: isCloud ? process.env.CLOUD_PASSWORD : process.env.LOCAL_PASSWORD,
-        connectTimeout: 30000,
-        enableKeepAlive: true,
-        keepAliveInitialDelay: 0,
-        ssl: isCloud ? { rejectUnauthorized: false } : undefined,
-      };
-      let connection: any;
-      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-      const connect = async () => {
-        let lastError: any;
-        for (let attempt = 1; attempt <= 4; attempt += 1) {
-          try {
-            return await mysql.createConnection(connectionConfig);
-          } catch (error: any) {
-            lastError = error;
-            if (!["PROTOCOL_CONNECTION_LOST", "ECONNRESET", "ETIMEDOUT"].includes(error?.code)) break;
-            await sleep(800 * attempt);
-          }
-        }
-        throw lastError;
-      };
-      connection = await connect();
-      let queryQueue = Promise.resolve();
-      pool = {
-        query: (sql: string, params?: any[]) => {
-          const runQuery = async () => {
-            try {
-              return await connection.query(sql, params);
-            } catch (error: any) {
-              if (!["PROTOCOL_CONNECTION_LOST", "ECONNRESET", "ETIMEDOUT"].includes(error?.code)) throw error;
-              try {
-                await connection.destroy?.();
-              } catch {}
-              connection = await connect();
-              return connection.query(sql, params);
-            }
-          };
-          const nextQuery = queryQueue.then(
-            runQuery,
-            runQuery,
-          );
-          queryQueue = nextQuery.then(
-            () => undefined,
-            () => undefined,
-          );
-          return nextQuery;
-        },
-        end: async () => {
-          await queryQueue;
-          await connection.end();
-        },
-      };
+      const { default: pool } = await import("./mysql.server");
       const filters: ReportFilters = { ...(data || {}) };
       const sessionUser = await requireSessionUser(pool);
       filters.userId = sessionUser.id;
@@ -1774,7 +1679,5 @@ export const getReportsAnalytics = createServerFn({ method: "POST" })
     } catch (error: any) {
       console.error("Reports Analytics Error:", error);
       return { success: false, error: error.message };
-    } finally {
-      await pool?.end?.();
     }
   });

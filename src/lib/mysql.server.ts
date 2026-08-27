@@ -1,12 +1,21 @@
-﻿import mysql from 'mysql2/promise';
+import mysql from 'mysql2/promise';
 
 function getDbConfig() {
-  if (process.env.MYSQL_URL || process.env.DATABASE_URL) {
-    const url = process.env.MYSQL_URL || process.env.DATABASE_URL;
-    return { uri: url };
-  }
+  const isCloud = process.env.DB_MODE === 'cloud' || !!process.env.RAILWAY_HOST || !!process.env.MYSQL_HOST || !!process.env.MYSQLHOST || !!process.env.MYSQL_URL || !!process.env.DATABASE_URL;
 
-  const isCloud = process.env.DB_MODE === 'cloud' || !!process.env.RAILWAY_HOST || !!process.env.MYSQL_HOST || !!process.env.MYSQLHOST;
+  if (process.env.MYSQL_URL || process.env.DATABASE_URL) {
+    const uri = process.env.MYSQL_URL || process.env.DATABASE_URL;
+    return {
+      uri,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+      connectTimeout: 30000,
+      ssl: isCloud ? { rejectUnauthorized: false } : undefined,
+    };
+  }
 
   const host =
     process.env.MYSQL_HOST ||
@@ -51,22 +60,18 @@ function getDbConfig() {
     database,
     user,
     password,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+    connectTimeout: 30000,
     ssl: (isCloud && !host.includes('localhost') && !host.includes('127.0.0.1') && !host.includes('192.168.')) ? { rejectUnauthorized: false } : undefined
   };
 }
 
 const dbConfig: any = getDbConfig();
 
-const pool = dbConfig.uri
-  ? mysql.createPool(dbConfig.uri)
-  : mysql.createPool({
-      ...dbConfig,
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0,
-      enableKeepAlive: true,
-      keepAliveInitialDelay: 0,
-      connectTimeout: 30000,
-    });
+const pool = mysql.createPool(dbConfig);
 
 export default pool;
