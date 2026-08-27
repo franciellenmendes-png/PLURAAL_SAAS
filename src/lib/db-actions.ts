@@ -226,21 +226,13 @@ export const syncLocalToRailway = createServerFn({ method: "POST" })
       const { default: authPool } = await import("./mysql.server");
       await requireAdminUser(authPool);
 
+      const { default: cloud } = await import("./mysql.server");
       const local = await mysql.createConnection({
-        host: process.env.LOCAL_HOST,
+        host: process.env.LOCAL_HOST || '127.0.0.1',
         port: Number(process.env.LOCAL_PORT) || 3306,
-        database: process.env.LOCAL_DB,
-        user: process.env.LOCAL_USER,
-        password: process.env.LOCAL_PASSWORD,
-      });
-
-      const cloud = await mysql.createConnection({
-        host: process.env.CLOUD_HOST,
-        port: Number(process.env.CLOUD_PORT) || 4000,
-        database: process.env.CLOUD_DB,
-        user: process.env.CLOUD_USER,
-        password: process.env.CLOUD_PASSWORD,
-        ssl: { rejectUnauthorized: false },
+        database: process.env.LOCAL_DB || 'plurall',
+        user: process.env.LOCAL_USER || 'root',
+        password: process.env.LOCAL_PASSWORD || '',
       });
 
       try {
